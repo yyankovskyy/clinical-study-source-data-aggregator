@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+gemini_hack_3_11/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+agent_outputs/
+pipeline_output/
+*.zip
+.DS_Store
+gemini_hack/
