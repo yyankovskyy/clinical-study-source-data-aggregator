@@ -1,14 +1,18 @@
+# Credentials & Virtual Environments
 .env
 .env.*
 !.env.example
+gemini_hack/
 gemini_hack_3_11/
 .venv/
 venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-agent_outputs/
 pipeline_output/
+clinical_pipeline_outputs/
+agent_outputs/
+my_study_outputs/
+my_adam_outputs/
 *.zip
 .DS_Store
-gemini_hack/
