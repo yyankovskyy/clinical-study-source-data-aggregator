@@ -167,10 +167,12 @@ def run_dropout_and_survival_pipeline(
         raise RuntimeError(f"LeakageGuard blocked post-baseline/outcome columns: {leaked}")
 
     y = sub.set_index("USUBJID")["EVENT_DROPOUT"]
-    num_cols = [c for c in feat.columns if feat[c].dtype != object]
-    cat_cols = [c for c in feat.columns if feat[c].dtype == object]
+    num_cols = [c for c in feat.columns if pd.api.types.is_numeric_dtype(feat[c])]
+    cat_cols = [c for c in feat.columns if not pd.api.types.is_numeric_dtype(feat[c])]
 
-    X_tr, X_te, y_tr, y_te = train_test_split(feat, y, test_size=0.25, random_state=42, stratify=y if y.nunique() > 1 else None)
+    tsize = 0.5 if len(feat) < 8 else 0.25
+    can_strat = y.nunique() > 1 and y.value_counts().min() >= 2
+    X_tr, X_te, y_tr, y_te = train_test_split(feat, y, test_size=tsize, random_state=42, stratify=y if can_strat else None)
     pre = ColumnTransformer([
         ("num", Pipeline([("imp", SimpleImputer(strategy="median")), ("sc", StandardScaler())]), num_cols),
         ("cat", Pipeline([("imp", SimpleImputer(strategy="most_frequent")), ("oh", OneHotEncoder(handle_unknown="ignore"))]), cat_cols),

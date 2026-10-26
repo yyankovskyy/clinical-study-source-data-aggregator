@@ -81,7 +81,7 @@ def read_sdtm_file(path: Path) -> pd.DataFrame:
     if ext == ".xpt":
         df = pd.read_sas(path, format="xport")
         for c in df.columns:
-            if df[c].dtype == object:
+            if df[c].dtype == object or pd.api.types.is_string_dtype(df[c]):
                 df[c] = df[c].apply(
                     lambda x: x.decode("utf-8", errors="replace").strip()
                     if isinstance(x, (bytes, bytearray))
@@ -89,7 +89,7 @@ def read_sdtm_file(path: Path) -> pd.DataFrame:
                 )
     elif ext == ".csv":
         df = pd.read_csv(path, low_memory=False)
-        for c in df.select_dtypes(include=["object"]).columns:
+        for c in df.select_dtypes(include=["object", "string"]).columns:
             df[c] = df[c].apply(lambda x: x.strip() if isinstance(x, str) else x)
     else:
         raise ValueError(f"Unsupported file format: {path.suffix}")
@@ -203,10 +203,10 @@ def combine_supp(parent_df: pd.DataFrame, supp_df: Optional[pd.DataFrame], domai
             col = str(idv).strip().upper()
             if col in df.columns:
                 g = grp.copy()
-                try:
-                    g[col] = pd.to_numeric(g["IDVARVAL"])
-                except Exception:
-                    g[col] = g["IDVARVAL"]
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    g[col] = pd.to_numeric(g["IDVARVAL"], errors="coerce")
+                else:
+                    g[col] = g["IDVARVAL"].astype(str)
                 piv = g.pivot_table(index=["STUDYID", "USUBJID", col], columns="QNAM", values="QVAL", aggfunc="first").reset_index()
                 qcols = [c for c in piv.columns if c not in ("STUDYID", "USUBJID", col) and c not in df.columns]
                 added.extend(qcols)

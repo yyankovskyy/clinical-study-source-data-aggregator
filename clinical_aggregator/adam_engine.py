@@ -17,6 +17,10 @@ ADVS_LOOKUP = pd.DataFrame([
 ])
 
 
+def w_str(cond: Any, t: Any, f: Any = np.nan) -> np.ndarray:
+    return np.where(np.asarray(cond, dtype=bool), np.asarray(t, dtype=object), np.asarray(f, dtype=object))
+
+
 @dataclass
 class LineageStep:
     step_id: str
@@ -46,8 +50,8 @@ def convert_blanks_to_na(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for c in out.columns:
         if out[c].dtype == object or pd.api.types.is_string_dtype(out[c]):
-            out[c] = out[c].apply(
-                lambda v: np.nan if (v is None or (isinstance(v, str) and v.strip() in ("", "."))) else (v.strip() if isinstance(v, str) else v)
+            out[c] = out[c].astype(object).apply(
+                lambda v: np.nan if (v is None or pd.isna(v) or (isinstance(v, str) and v.strip() in ("", "."))) else (v.strip() if isinstance(v, str) else v)
             )
     return out
 
@@ -56,7 +60,8 @@ def derive_vars_dt(df: pd.DataFrame, dtc: str, prefix: str = "A", impute_month: 
     out = df.copy()
     dt_col, dtf_col = f"{prefix}DT", f"{prefix}DTF"
     if dtc not in out.columns:
-        out[dt_col], out[dtf_col] = pd.NaT, np.nan
+        out[dt_col] = pd.NaT
+        out[dtf_col] = pd.Series(np.nan, index=out.index, dtype="object")
         return out
     dates, flags = [], []
     for val in out[dtc].fillna("").astype(str).str.strip():
@@ -99,7 +104,7 @@ def derive_vars_merged(
     sub = add_df[filter_fn(add_df)].copy() if filter_fn is not None else add_df.copy()
     if sub.empty:
         for k in new_vars:
-            out[k] = np.nan
+            out[k] = pd.Series(np.nan, index=out.index, dtype="object")
         return out
     if order:
         vo = [c for c in order if c in sub.columns]
@@ -165,23 +170,28 @@ def build_adsl(bundle: IngestionBundle, manifest: LineageManifest, impute_dates:
             lambda d: (d["DSCAT"].astype(str).str.upper() == "DISPOSITION EVENT") & (d["DSDECOD"].astype(str).str.upper() != "SCREEN FAILURE"),
             ["DSSTDT", "DSSEQ"], "last", manifest, "ADSL",
         )
-        adsl["EOSSTT"] = adsl["DSDECOD_EOS"].apply(lambda x: "ONGOING" if pd.isna(x) else ("COMPLETED" if str(x).upper() == "COMPLETED" else ("DISCONTINUED" if str(x).upper() != "SCREEN FAILURE" else np.nan)))
+        adsl["EOSSTT"] = adsl["DSDECOD_EOS"].astype(object).apply(
+            lambda x: "ONGOING" if pd.isna(x) else ("COMPLETED" if str(x).upper() == "COMPLETED" else ("DISCONTINUED" if str(x).upper() != "SCREEN FAILURE" else np.nan))
+        ).astype(object)
         adsl.loc[adsl["ARMCD"].astype(str).str.upper() == "SCRNFAIL", "EOSSTT"] = np.nan
-        adsl["DCSREAS"] = np.where(adsl["EOSSTT"] == "DISCONTINUED", adsl["DSDECOD_EOS"], np.nan)
-        adsl["DISCONFL"] = np.where(adsl["EOSSTT"] == "DISCONTINUED", "Y", np.nan)
+        adsl["DCSREAS"] = w_str(adsl["EOSSTT"] == "DISCONTINUED", adsl["DSDECOD_EOS"], np.nan)
+        adsl["DISCONFL"] = w_str(adsl["EOSSTT"] == "DISCONTINUED", "Y", np.nan)
         adsl = derive_vars_merged(adsl, ds, ["STUDYID", "USUBJID"], {"RANDDT": "DSSTDT"}, lambda d: d["DSDECOD"].astype(str).str.upper() == "RANDOMIZED", ["DSSTDT", "DSSEQ"], "first", manifest, "ADSL")
         adsl = adsl.drop(columns=["DSDECOD_EOS", "DSTERM_EOS"], errors="ignore")
     else:
-        adsl["EOSDT"], adsl["EOSSTT"], adsl["DCSREAS"], adsl["DISCONFL"] = pd.NaT, "ONGOING", np.nan, np.nan
+        adsl["EOSDT"] = pd.NaT
+        adsl["EOSSTT"] = "ONGOING"
+        adsl["DCSREAS"] = pd.Series(np.nan, index=adsl.index, dtype="object")
+        adsl["DISCONFL"] = pd.Series(np.nan, index=adsl.index, dtype="object")
 
     adsl["AAGE"] = pd.to_numeric(adsl["AGE"], errors="coerce")
-    adsl["AGEGR1"] = np.where(adsl["AAGE"].isna(), np.nan, np.where(adsl["AAGE"] < 65, "<65", np.where(adsl["AAGE"] <= 80, "65-80", ">80")))
+    adsl["AGEGR1"] = w_str(adsl["AAGE"].isna(), np.nan, w_str(adsl["AAGE"] < 65, "<65", w_str(adsl["AAGE"] <= 80, "65-80", ">80")))
     adsl["AGEGR1N"] = np.where(adsl["AAGE"].isna(), np.nan, np.where(adsl["AAGE"] < 65, 1, np.where(adsl["AAGE"] <= 80, 2, 3)))
     is_rand = ~adsl["ARMCD"].astype(str).str.upper().isin(["SCRNFAIL", "NOTASSGN", "NAN", ""])
-    adsl["ITTFL"] = np.where(is_rand, "Y", "N")
-    adsl["SAFFL"] = np.where((adsl["ITTFL"] == "Y") & adsl["TRTSDT"].notna(), "Y", "N")
+    adsl["ITTFL"] = w_str(is_rand, "Y", "N")
+    adsl["SAFFL"] = w_str((adsl["ITTFL"] == "Y") & adsl["TRTSDT"].notna(), "Y", "N")
     adsl["EFFFL"] = adsl.get("EFFFL", adsl["SAFFL"])
-    adsl["COMP24FL"] = adsl.get("COMP24FL", np.where(adsl["EOSSTT"] == "COMPLETED", "Y", "N"))
+    adsl["COMP24FL"] = adsl.get("COMP24FL", w_str(adsl["EOSSTT"] == "COMPLETED", "Y", "N"))
 
     manifest.log("ADSL", ["TRT01P", "TRTSDT", "TRTEDT", "TRTDURD", "EOSSTT", "DCSREAS", "ITTFL", "SAFFL"], ["DM", "SUPPDM", "EX", "DS"], "Construct Subject-Level ADSL", "admiral::derive_vars_merged + derive_var_trtdurd", len(adsl))
     return adsl
@@ -191,12 +201,12 @@ def _finalize_bds(df: pd.DataFrame, seq_col: str, manifest: LineageManifest, ds_
     out = df.copy()
     out["BASETYPE"] = "LAST"
     adt, ts, te = pd.to_datetime(out["ADT"], errors="coerce"), pd.to_datetime(out["TRTSDT"], errors="coerce"), pd.to_datetime(out["TRTEDT"], errors="coerce")
-    out["ONTRTFL"] = np.where(adt.notna() & ts.notna() & (adt >= ts) & (te.isna() | (adt <= te)), "Y", np.nan)
+    out["ONTRTFL"] = w_str(adt.notna() & ts.notna() & (adt >= ts) & (te.isna() | (adt <= te)), "Y", np.nan)
 
     av, lo, hi = pd.to_numeric(out["AVAL"], errors="coerce"), pd.to_numeric(out.get("ANRLO"), errors="coerce"), pd.to_numeric(out.get("ANRHI"), errors="coerce")
-    out["ANRIND"] = np.where(av.isna() | (lo.isna() & hi.isna()), np.nan, np.where(lo.notna() & (av < lo), "LOW", np.where(hi.notna() & (av > hi), "HIGH", "NORMAL")))
+    out["ANRIND"] = w_str(av.isna() | (lo.isna() & hi.isna()), np.nan, w_str(lo.notna() & (av < lo), "LOW", w_str(hi.notna() & (av > hi), "HIGH", "NORMAL")))
 
-    out["ABLFL"] = np.nan
+    out["ABLFL"] = pd.Series(np.nan, index=out.index, dtype="object")
     bl_elig = out[av.notna() & ((adt.notna() & ts.notna() & (adt <= ts)) | (ts.isna() & out.get("VISIT", pd.Series("", index=out.index)).astype(str).str.upper().str.contains("BASELINE", na=False)))].copy()
     if not bl_elig.empty:
         ocols = [c for c in ["ADT", "ATPTN", "VISITNUM", seq_col] if c in bl_elig.columns]
@@ -214,9 +224,9 @@ def _finalize_bds(df: pd.DataFrame, seq_col: str, manifest: LineageManifest, ds_
     with np.errstate(divide="ignore", invalid="ignore"):
         out["PCHG"] = np.where(av.notna() & base_n.notna() & (base_n != 0), ((av - base_n) / np.abs(base_n)) * 100.0, np.nan)
         out["R2BASE"] = np.where(av.notna() & base_n.notna() & (base_n != 0), av / base_n, np.nan)
-    out["SHIFT1"] = np.where(out["BNRIND"].notna() & out["ANRIND"].notna(), out["BNRIND"].astype(str) + " to " + out["ANRIND"].astype(str), np.nan)
+    out["SHIFT1"] = w_str(out["BNRIND"].notna() & out["ANRIND"].notna(), out["BNRIND"].astype(str) + " to " + out["ANRIND"].astype(str), np.nan)
 
-    out["ANL01FL"] = np.nan
+    out["ANL01FL"] = pd.Series(np.nan, index=out.index, dtype="object")
     anl_elig = out[av.notna() & out["AVISIT"].notna() & ~out["AVISIT"].astype(str).str.upper().str.contains("UNSCHED", na=False)].copy()
     if not anl_elig.empty:
         ocols = [c for c in ["ADT", "ATPTN", "VISITNUM", seq_col] if c in anl_elig.columns]
@@ -247,20 +257,23 @@ def build_bds_datasets(
             advs["PARAMCD"] = advs["VSTESTCD"].astype(str).str.upper()
             advs["AVAL"] = pd.to_numeric(advs["VSSTRESN"], errors="coerce")
             advs["AVALC"] = advs["VSSTRESC"].astype(str)
-            advs["DTYPE"], advs["SRCDOM"], advs["SRCVAR"], advs["SRCSEQ"] = np.nan, "VS", "VSSTRESN", advs["VSSEQ"]
-            advs["AVISIT"] = np.where(advs["VISIT"].isna() | advs["VISIT"].astype(str).str.upper().str.contains("SCREEN|UNSCHED", na=False), np.nan, advs["VISIT"].astype(str).str.title())
+            advs["DTYPE"] = pd.Series(np.nan, index=advs.index, dtype="object")
+            advs["SRCDOM"], advs["SRCVAR"], advs["SRCSEQ"] = "VS", "VSSTRESN", advs["VSSEQ"]
+            advs["AVISIT"] = w_str(advs["VISIT"].isna() | advs["VISIT"].astype(str).str.upper().str.contains("SCREEN|UNSCHED", na=False), np.nan, advs["VISIT"].astype(str).str.title())
             advs["AVISITN"] = pd.to_numeric(advs.get("VISITNUM"), errors="coerce")
             advs["ATPTN"] = pd.to_numeric(advs.get("VSTPTNUM"), errors="coerce")
 
             bp = advs[advs["PARAMCD"].isin(["SYSBP", "DIABP"]) & advs["AVAL"].notna()]
             if not bp.empty:
                 gcols = [c for c in ["STUDYID", "USUBJID", "VISIT", "VISITNUM", "ADT", "ADY", "AVISIT", "AVISITN", "ATPTN"] if c in bp.columns]
-                piv = bp.pivot_table(index=gcols, columns="PARAMCD", values="AVAL", aggfunc="last").reset_index().dropna(subset=["SYSBP", "DIABP"])
-                if not piv.empty:
-                    piv["AVAL"] = (piv["SYSBP"] + 2.0 * piv["DIABP"]) / 3.0
-                    piv["AVALC"], piv["PARAMCD"], piv["VSTESTCD"], piv["DTYPE"], piv["SRCDOM"], piv["SRCVAR"], piv["SRCSEQ"] = piv["AVAL"].round(2).astype(str), "MAP", "MAP", "CALCULATION", "VS", "SYSBP+DIABP", np.nan
-                    piv = piv.drop(columns=["SYSBP", "DIABP"]).merge(adsl[adsl_cols], on=["STUDYID", "USUBJID"], how="left")
-                    advs = pd.concat([advs, piv], ignore_index=True)
+                piv = bp.pivot_table(index=gcols, columns="PARAMCD", values="AVAL", aggfunc="last").reset_index()
+                if "SYSBP" in piv.columns and "DIABP" in piv.columns:
+                    piv = piv.dropna(subset=["SYSBP", "DIABP"])
+                    if not piv.empty:
+                        piv["AVAL"] = (piv["SYSBP"] + 2.0 * piv["DIABP"]) / 3.0
+                        piv["AVALC"], piv["PARAMCD"], piv["VSTESTCD"], piv["DTYPE"], piv["SRCDOM"], piv["SRCVAR"], piv["SRCSEQ"] = piv["AVAL"].round(2).astype(str), "MAP", "MAP", "CALCULATION", "VS", "SYSBP+DIABP", np.nan
+                        piv = piv.drop(columns=["SYSBP", "DIABP"]).merge(adsl[adsl_cols], on=["STUDYID", "USUBJID"], how="left")
+                        advs = pd.concat([advs, piv], ignore_index=True)
 
             advs = advs.merge(ADVS_LOOKUP, on="PARAMCD", how="left")
             advs = _finalize_bds(advs, "VSSEQ", manifest, "ADVS")
@@ -282,8 +295,9 @@ def build_bds_datasets(
             adlb["AVAL"] = pd.to_numeric(adlb["LBSTRESN"], errors="coerce")
             adlb["AVALC"] = adlb["LBSTRESC"].astype(str)
             adlb["ANRLO"], adlb["ANRHI"] = pd.to_numeric(adlb.get("LBSTNRLO"), errors="coerce"), pd.to_numeric(adlb.get("LBSTNRHI"), errors="coerce")
-            adlb["DTYPE"], adlb["SRCDOM"], adlb["SRCVAR"], adlb["SRCSEQ"] = np.nan, "LB", "LBSTRESN", adlb["LBSEQ"]
-            adlb["AVISIT"] = np.where(adlb["VISIT"].isna() | adlb["VISIT"].astype(str).str.upper().str.contains("UNSCHED", na=False), np.nan, adlb["VISIT"].astype(str).str.title())
+            adlb["DTYPE"] = pd.Series(np.nan, index=adlb.index, dtype="object")
+            adlb["SRCDOM"], adlb["SRCVAR"], adlb["SRCSEQ"] = "LB", "LBSTRESN", adlb["LBSEQ"]
+            adlb["AVISIT"] = w_str(adlb["VISIT"].isna() | adlb["VISIT"].astype(str).str.upper().str.contains("UNSCHED", na=False), np.nan, adlb["VISIT"].astype(str).str.title())
             adlb["AVISITN"], adlb["ATPTN"] = pd.to_numeric(adlb.get("VISITNUM"), errors="coerce"), 1
             adlb = _finalize_bds(adlb, "LBSEQ", manifest, "ADLB")
             outputs["ADLB"] = adlb
@@ -301,7 +315,8 @@ def build_bds_datasets(
             adeg["PARAMN"] = adeg["PARAMCD"].astype("category").cat.codes + 1
             adeg["AVAL"] = pd.to_numeric(adeg["EGSTRESN"], errors="coerce")
             adeg["AVISIT"], adeg["AVISITN"], adeg["ATPTN"] = adeg.get("VISIT", "Visit 1"), pd.to_numeric(adeg.get("VISITNUM", 1), errors="coerce"), 1
-            adeg["ANRLO"], adeg["ANRHI"], adeg["DTYPE"] = np.nan, np.nan, np.nan
+            adeg["ANRLO"], adeg["ANRHI"] = np.nan, np.nan
+            adeg["DTYPE"] = pd.Series(np.nan, index=adeg.index, dtype="object")
             adeg["SRCDOM"], adeg["SRCVAR"], adeg["SRCSEQ"] = "EG", "EGSTRESN", adeg.get("EGSEQ", 1)
             adeg = _finalize_bds(adeg, "EGSEQ", manifest, "ADEG")
             outputs["ADEG"] = adeg
@@ -321,18 +336,19 @@ def build_bds_datasets(
             adbcva = oe_c.merge(adsl_oe[adsl_cols + (["STUDYEYE"] if "STUDYEYE" not in adsl_cols else [])], on=["STUDYID", "USUBJID"], how="left")
             adbcva = derive_vars_dy(derive_vars_dt(adbcva, "OEDTC", "A"), "TRTSDT", "ADT", "ADY")
             lat = adbcva.get("OELAT", pd.Series("RIGHT", index=adbcva.index)).astype(str).str.upper()
-            adbcva["AFEYE"] = np.where(lat == adbcva["STUDYEYE"].astype(str).str.upper(), "Study Eye", "Fellow Eye")
-            adbcva["PARAMCD"] = np.where(adbcva["AFEYE"] == "Study Eye", "SBCVA", "FBCVA")
-            adbcva["PARAM"] = np.where(adbcva["PARAMCD"] == "SBCVA", "Study Eye Visual Acuity Score (letters)", "Fellow Eye Visual Acuity Score (letters)")
+            adbcva["AFEYE"] = w_str(lat == adbcva["STUDYEYE"].astype(str).str.upper(), "Study Eye", "Fellow Eye")
+            adbcva["PARAMCD"] = w_str(adbcva["AFEYE"] == "Study Eye", "SBCVA", "FBCVA")
+            adbcva["PARAM"] = w_str(adbcva["PARAMCD"] == "SBCVA", "Study Eye Visual Acuity Score (letters)", "Fellow Eye Visual Acuity Score (letters)")
             adbcva["PARAMN"] = np.where(adbcva["PARAMCD"] == "SBCVA", 1, 2)
             adbcva["AVAL"] = pd.to_numeric(adbcva["OESTRESN"], errors="coerce")
-            adbcva["DTYPE"], adbcva["AVISIT"], adbcva["AVISITN"], adbcva["ATPTN"] = np.nan, adbcva.get("VISIT", "Visit 1"), pd.to_numeric(adbcva.get("VISITNUM", 1), errors="coerce"), 1
+            adbcva["DTYPE"] = pd.Series(np.nan, index=adbcva.index, dtype="object")
+            adbcva["AVISIT"], adbcva["AVISITN"], adbcva["ATPTN"] = adbcva.get("VISIT", "Visit 1"), pd.to_numeric(adbcva.get("VISITNUM", 1), errors="coerce"), 1
             adbcva["ANRLO"], adbcva["ANRHI"], adbcva["SRCDOM"], adbcva["SRCVAR"], adbcva["SRCSEQ"] = 70.0, 100.0, "OE", "OESTRESN", adbcva.get("OESEQ", 1)
 
             log_df = adbcva[adbcva["AVAL"].notna()].copy()
             log_df["AVAL"] = (-0.02 * log_df["AVAL"] + 1.7).round(4)
-            log_df["PARAMCD"] = np.where(log_df["PARAMCD"] == "SBCVA", "SBCVALOG", "FBCVALOG")
-            log_df["PARAM"] = np.where(log_df["PARAMCD"] == "SBCVALOG", "Study Eye Visual Acuity LogMAR Score", "Fellow Eye Visual Acuity LogMAR Score")
+            log_df["PARAMCD"] = w_str(log_df["PARAMCD"] == "SBCVA", "SBCVALOG", "FBCVALOG")
+            log_df["PARAM"] = w_str(log_df["PARAMCD"] == "SBCVALOG", "Study Eye Visual Acuity LogMAR Score", "Fellow Eye Visual Acuity LogMAR Score")
             log_df["PARAMN"] = np.where(log_df["PARAMCD"] == "SBCVALOG", 3, 4)
             log_df["DTYPE"] = "LOGMAR"
             for sc in ("VISIT", "VISITNUM", "OEDY", "OEDTC"):
@@ -341,7 +357,7 @@ def build_bds_datasets(
             adbcva = pd.concat([adbcva, log_df], ignore_index=True)
             adbcva = _finalize_bds(adbcva, "OESEQ", manifest, "ADBCVA")
             adbcva["CRIT1"] = "Gain of >= 5 and <= 10 letters relative to baseline"
-            adbcva["CRIT1FL"] = np.where(adbcva["PARAMCD"].isin(["SBCVA", "FBCVA"]) & adbcva["CHG"].between(5, 10), "Y", "N")
+            adbcva["CRIT1FL"] = w_str(adbcva["PARAMCD"].isin(["SBCVA", "FBCVA"]) & adbcva["CHG"].between(5, 10), "Y", "N")
             outputs["ADBCVA"] = adbcva
             status["ADBCVA"] = f"SUCCESS ({len(adbcva)} rows)"
 
